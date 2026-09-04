@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>God Simulator - Prototype</title>
+    <title>God Simulator - Step 2</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -24,6 +24,7 @@
             border-bottom: 2px solid #0f3460;
             width: 100%;
             justify-content: center;
+            flex-wrap: wrap;
         }
         button {
             background: #0f3460;
@@ -35,32 +36,38 @@
             transition: background 0.2s;
         }
         button:hover { background: #533483; }
+        button.active { background: #e94560; border-color: #e94560; }
         #speed-control { display: flex; align-items: center; gap: 8px; }
         input[type="range"] { width: 100px; }
-        #day-counter {
+        .stat-box {
             background: #0f3460;
             padding: 8px 16px;
             border: 1px solid #533483;
-            min-width: 120px;
+            min-width: 100px;
             text-align: center;
         }
         #game-canvas {
             border: 2px solid #0f3460;
             margin-top: 10px;
             image-rendering: pixelated;
+            cursor: default;
         }
+        #game-canvas.spawn-mode { cursor: crosshair; }
     </style>
 </head>
 <body>
     <div id="ui-panel">
         <button id="btn-generate">Сгенерировать заново</button>
         <button id="btn-pause">Пауза</button>
+        <button id="btn-spawn">Спавн человека</button>
         <div id="speed-control">
             <label>Скорость:</label>
             <input type="range" id="speed-slider" min="1" max="60" value="10">
             <span id="speed-value">10</span>
         </div>
-        <div id="day-counter">День: 0</div>
+        <div class="stat-box" id="day-counter">День: 0</div>
+        <div class="stat-box" id="pop-counter">Людей: 0</div>
+        <div class="stat-box" id="kingdom-counter">Королевств: 0</div>
     </div>
     <canvas id="game-canvas"></canvas>
 
@@ -68,15 +75,13 @@
     // ==================== КОНСТАНТЫ ====================
     const WORLD_SIZE = 80;
     const BIOMES = {
-        DEEP_WATER:  { color: '#1a3a52', name: 'Глубокая вода' },
-        SHALLOW:     { color: '#4a90a4', name: 'Мелководье' },
-        SAND:        { color: '#e8d68c', name: 'Песок' },
-        GRASS:       { color: '#5a8c3c', name: 'Трава' },
-        FOREST:      { color: '#2d5a1e', name: 'Лес' },
-        MOUNTAIN:    { color: '#6b6b6b', name: 'Горы' }
+        DEEP_WATER: { color: '#1a3a52', walkable: false },
+        SHALLOW:    { color: '#4a90a4', walkable: false },
+        SAND:       { color: '#e8d68c', walkable: true },
+        GRASS:      { color: '#5a8c3c', walkable: true },
+        FOREST:     { color: '#2d5a1e', walkable: true },
+        MOUNTAIN:   { color: '#6b6b6b', walkable: false }
     };
-
-    // Пороги высот для биомов
     const BIOME_THRESHOLDS = [
         { max: 0.25, biome: 'DEEP_WATER' },
         { max: 0.38, biome: 'SHALLOW' },
@@ -85,6 +90,18 @@
         { max: 0.82, biome: 'FOREST' },
         { max: 1.0,  biome: 'MOUNTAIN' }
     ];
+    // Палитра королевств
+    const KINGDOM_COLORS = [
+        { main: '#e94560', fade: 'rgba(233, 69, 96, 0.25)' },
+        { main: '#4a90e4', fade: 'rgba(74, 144, 228, 0.25)' },
+        { main: '#f5a623', fade: 'rgba(245, 166, 35, 0.25)' },
+        { main: '#b565e9', fade: 'rgba(181, 101, 233, 0.25)' },
+        { main: '#50e3a4', fade: 'rgba(80, 227, 164, 0.25)' },
+        { main: '#e8d68c', fade: 'rgba(232, 214, 140, 0.25)' }
+    ];
+
+    let nextUnitId = 1;
+    let nextKingdomId = 1;
 
     // ==================== КЛАСС TILE ====================
     class Tile {
@@ -93,15 +110,20 @@
             this.y = y;
             this.height = height;
             this.biome = this.calculateBiome();
+            this.unit = null;        // Ссылка на юнита (или null)
+            this.building = null;    // Ссылка на здание (или null)
+            this.kingdomId = null;   // ID королевства, которому принадлежит тайл
         }
 
         calculateBiome() {
-            for (let threshold of BIOME_THRESHOLDS) {
-                if (this.height <= threshold.max) {
-                    return threshold.biome;
-                }
+            for (let t of BIOME_THRESHOLDS) {
+                if (this.height <= t.max) return t.biome;
             }
             return 'MOUNTAIN';
+        }
+
+        isWalkable() {
+            return BIOMES[this.biome].walkable && !this.building;
         }
 
         render(ctx, tileSize) {
@@ -110,76 +132,291 @@
         }
     }
 
-    // ==================== КЛАСС UNIT ====================
-    class Unit {
-        constructor(x, y, type) {
+    // ==================== КЛАСС BUILDING ====================
+    class Building {
+        constructor(x, y, type, kingdomId) {
             this.x = x;
             this.y = y;
-            this.type = type;
-            this.alive = true;
+            this.type = type;          // 'house'
+            this.kingdomId = kingdomId;
         }
 
-        update(world) {
-            // Заготовка для будущей логики юнитов
-        }
-
-        render(ctx, tileSize) {
-            // Заготовка для отрисовки юнитов
+        render(ctx, tileSize, kingdomColor) {
+            const px = this.x * tileSize;
+            const py = this.y * tileSize;
+            const margin = tileSize * 0.15;
+            // Основание дома
+            ctx.fillStyle = '#6b4423';
+            ctx.fillRect(px + margin, py + margin, tileSize - margin * 2, tileSize - margin * 2);
+            // Крыша (цвет королевства)
+            ctx.fillStyle = kingdomColor;
+            ctx.fillRect(px + margin, py + margin, tileSize - margin * 2, (tileSize - margin * 2) * 0.4);
         }
     }
 
-    // ==================== ГЕНЕРАТОР ШУМА (Value Noise) ====================
+    // ==================== КЛАСС KINGDOM ====================
+    class Kingdom {
+        constructor(id, colorSet) {
+            this.id = id;
+            this.color = colorSet.main;
+            this.fadeColor = colorSet.fade;
+            this.tiles = new Set(); // Ключи "x,y"
+        }
+
+        addTile(x, y) {
+            this.tiles.add(`${x},${y}`);
+        }
+
+        hasTile(x, y) {
+            return this.tiles.has(`${x},${y}`);
+        }
+    }
+
+    // ==================== КЛАСС UNIT ====================
+    class Unit {
+        constructor(x, y) {
+            this.id = nextUnitId++;
+            this.x = x;
+            this.y = y;
+            this.color = '#ffffff';
+            this.hunger = 100;
+            this.wood = 0;
+            this.state = 'wandering'; // wandering | chopping | building
+            this.target = null;       // {x, y} — целевой тайл
+            this.kingdomId = null;
+            this.alive = true;
+        }
+
+        // Поиск соседнего тайла леса (радиус 1)
+        findNearbyForest(world) {
+            const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+            for (let [dx, dy] of dirs) {
+                const nx = this.x + dx;
+                const ny = this.y + dy;
+                if (world.inBounds(nx, ny)) {
+                    const tile = world.tiles[ny][nx];
+                    if (tile.biome === 'FOREST' && !tile.unit) return { x: nx, y: ny };
+                }
+            }
+            return null;
+        }
+
+        // Поиск свободного тайла земли для строительства (радиус 2)
+        findBuildSpot(world) {
+            for (let r = 1; r <= 2; r++) {
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const nx = this.x + dx;
+                        const ny = this.y + dy;
+                        if (world.inBounds(nx, ny)) {
+                            const tile = world.tiles[ny][nx];
+                            if (tile.biome === 'GRASS' && !tile.unit && !tile.building) {
+                                return { x: nx, y: ny };
+                            }
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        // Жадный шаг к цели по суше
+        stepTowards(world, target) {
+            const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+            let best = null;
+            let bestDist = Infinity;
+            const candidates = [];
+
+            for (let [dx, dy] of dirs) {
+                const nx = this.x + dx;
+                const ny = this.y + dy;
+                if (!world.inBounds(nx, ny)) continue;
+                const tile = world.tiles[ny][nx];
+                if (!tile.isWalkable() || tile.unit) continue;
+
+                const dist = Math.abs(nx - target.x) + Math.abs(ny - target.y);
+                candidates.push({ x: nx, y: ny, dist });
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = { x: nx, y: ny };
+                }
+            }
+
+            // Если жадный шаг невозможен (все соседи дальше) — случайный валидный
+            if (!best && candidates.length > 0) {
+                best = candidates[Math.floor(Math.random() * candidates.length)];
+            }
+            return best;
+        }
+
+        // Случайный шаг по суше
+        stepRandom(world) {
+            const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+            const valid = [];
+            for (let [dx, dy] of dirs) {
+                const nx = this.x + dx;
+                const ny = this.y + dy;
+                if (world.inBounds(nx, ny)) {
+                    const tile = world.tiles[ny][nx];
+                    if (tile.isWalkable() && !tile.unit) valid.push({ x: nx, y: ny });
+                }
+            }
+            if (valid.length === 0) return null;
+            return valid[Math.floor(Math.random() * valid.length)];
+        }
+
+        moveTo(world, pos) {
+            world.tiles[this.y][this.x].unit = null;
+            this.x = pos.x;
+            this.y = pos.y;
+            world.tiles[this.y][this.x].unit = this;
+        }
+
+        update(world) {
+            if (!this.alive) return;
+
+            // Голод
+            this.hunger -= 0.05;
+            if (this.hunger <= 0) {
+                this.die(world);
+                return;
+            }
+
+            const currentTile = world.tiles[this.y][this.x];
+
+            // Конечный автомат состояний
+            if (this.state === 'wandering') {
+                // Приоритет 1: построить дом, если есть ресурсы
+                if (this.wood >= 3) {
+                    const spot = this.findBuildSpot(world);
+                    if (spot) {
+                        this.target = spot;
+                        this.state = 'building';
+                    }
+                }
+                // Приоритет 2: найти лес рядом
+                else {
+                    const forest = this.findNearbyForest(world);
+                    if (forest) {
+                        this.target = forest;
+                        this.state = 'chopping';
+                    } else {
+                        // Случайное блуждание
+                        const next = this.stepRandom(world);
+                        if (next) this.moveTo(world, next);
+                    }
+                }
+            }
+
+            if (this.state === 'chopping') {
+                // Если цель уничтожена (другой юнит срубил) — вернуться в блуждание
+                if (!this.target || world.tiles[this.target.y][this.target.x].biome !== 'FOREST') {
+                    this.state = 'wandering';
+                    this.target = null;
+                    return;
+                }
+                // Если на цели — рубим
+                if (this.x === this.target.x && this.y === this.target.y) {
+                    const tile = world.tiles[this.y][this.x];
+                    tile.biome = 'GRASS'; // Превращаем лес в землю
+                    this.wood += 1;
+                    this.hunger = Math.min(100, this.hunger + 5); // Поели ягод
+                    world.markStaticDirty();
+                    this.state = 'wandering';
+                    this.target = null;
+                } else {
+                    const next = this.stepTowards(world, this.target);
+                    if (next) this.moveTo(world, next);
+                }
+            }
+
+            if (this.state === 'building') {
+                if (!this.target) {
+                    this.state = 'wandering';
+                    return;
+                }
+                // Если место занято — ищем новое
+                const tile = world.tiles[this.target.y][this.target.x];
+                if (tile.unit || tile.building || tile.biome !== 'GRASS') {
+                    const newSpot = this.findBuildSpot(world);
+                    if (newSpot) this.target = newSpot;
+                    else { this.state = 'wandering'; this.target = null; return; }
+                }
+                // Если на месте — строим
+                if (this.x === this.target.x && this.y === this.target.y) {
+                    this.wood -= 3;
+                    world.buildHouse(this.x, this.y, this.kingdomId);
+                    this.state = 'wandering';
+                    this.target = null;
+                } else {
+                    const next = this.stepTowards(world, this.target);
+                    if (next) this.moveTo(world, next);
+                }
+            }
+        }
+
+        die(world) {
+            this.alive = false;
+            world.tiles[this.y][this.x].unit = null;
+        }
+
+        render(ctx, tileSize) {
+            if (!this.alive) return;
+            const px = this.x * tileSize;
+            const py = this.y * tileSize;
+            const size = tileSize * 0.5;
+            const offset = (tileSize - size) / 2;
+            ctx.fillStyle = this.color;
+            ctx.fillRect(px + offset, py + offset, size, size);
+            // Индикатор состояния
+            if (this.state === 'chopping') {
+                ctx.fillStyle = '#ffaa00';
+                ctx.fillRect(px + offset, py + offset, size * 0.3, size * 0.3);
+            } else if (this.state === 'building') {
+                ctx.fillStyle = '#00aaff';
+                ctx.fillRect(px + offset, py + offset, size * 0.3, size * 0.3);
+            }
+        }
+    }
+
+    // ==================== ГЕНЕРАТОР ШУМА ====================
     class NoiseGenerator {
         constructor(seed) {
             this.seed = seed || Math.random() * 10000;
             this.permutation = this.generatePermutation();
         }
-
         generatePermutation() {
             const perm = [];
             for (let i = 0; i < 256; i++) perm[i] = i;
-            // Перемешивание с seed
             let s = this.seed;
             for (let i = 255; i > 0; i--) {
                 s = (s * 9301 + 49297) % 233280;
                 const j = Math.floor((s / 233280) * (i + 1));
                 [perm[i], perm[j]] = [perm[j], perm[i]];
             }
-            return perm.concat(perm); // Дублирование для удобства
+            return perm.concat(perm);
         }
-
-        fade(t) {
-            return t * t * t * (t * (t * 6 - 15) + 10); // Улучшенная интерполяция
-        }
-
-        lerp(t, a, b) {
-            return a + t * (b - a);
-        }
-
+        fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+        lerp(t, a, b) { return a + t * (b - a); }
         grad(hash, x, y) {
             const h = hash & 3;
             const u = h < 2 ? x : y;
             const v = h < 2 ? y : x;
             return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
         }
-
         noise2D(x, y) {
             const X = Math.floor(x) & 255;
             const Y = Math.floor(y) & 255;
-            
             x -= Math.floor(x);
             y -= Math.floor(y);
-            
             const u = this.fade(x);
             const v = this.fade(y);
-            
             const A = this.permutation[X] + Y;
             const AA = this.permutation[A];
             const AB = this.permutation[A + 1];
             const B = this.permutation[X + 1] + Y;
             const BA = this.permutation[B];
             const BB = this.permutation[B + 1];
-            
             return this.lerp(v,
                 this.lerp(u, this.grad(this.permutation[AA], x, y),
                              this.grad(this.permutation[BA], x - 1, y)),
@@ -187,21 +424,14 @@
                              this.grad(this.permutation[BB], x - 1, y - 1))
             );
         }
-
-        // Фрактальный шум (несколько октав)
         fractal(x, y, octaves, persistence, lacunarity) {
-            let total = 0;
-            let frequency = 1;
-            let amplitude = 1;
-            let maxValue = 0;
-            
+            let total = 0, frequency = 1, amplitude = 1, maxValue = 0;
             for (let i = 0; i < octaves; i++) {
                 total += this.noise2D(x * frequency, y * frequency) * amplitude;
                 maxValue += amplitude;
                 amplitude *= persistence;
                 frequency *= lacunarity;
             }
-            
             return total / maxValue;
         }
     }
@@ -212,59 +442,151 @@
             this.size = size;
             this.tiles = [];
             this.units = [];
+            this.buildings = [];
+            this.kingdoms = new Map();
+            this.staticDirty = true; // Флаг для перерисовки статики
             this.generate();
+        }
+
+        inBounds(x, y) {
+            return x >= 0 && x < this.size && y >= 0 && y < this.size;
+        }
+
+        markStaticDirty() {
+            this.staticDirty = true;
         }
 
         generate() {
             const noise = new NoiseGenerator();
             this.tiles = [];
-            
-            const scale = 0.05; // Масштаб шума
-            const octaves = 4;
-            const persistence = 0.5;
-            const lacunarity = 2.0;
-            
+            this.units = [];
+            this.buildings = [];
+            this.kingdoms.clear();
+
+            const scale = 0.05;
             for (let y = 0; y < this.size; y++) {
                 this.tiles[y] = [];
                 for (let x = 0; x < this.size; x++) {
-                    // Генерация высоты с фрактальным шумом
-                    let height = noise.fractal(x * scale, y * scale, octaves, persistence, lacunarity);
-                    
-                    // Нормализация в диапазон [0, 1]
+                    let height = noise.fractal(x * scale, y * scale, 4, 0.5, 2.0);
                     height = (height + 1) / 2;
-                    
-                    // Радиальное затухание к краям (создает эффект материка/островов)
-                    const centerX = this.size / 2;
-                    const centerY = this.size / 2;
-                    const dx = (x - centerX) / centerX;
-                    const dy = (y - centerY) / centerY;
-                    const distance = Math.sqrt(dx * dx + dy * dy);
-                    const falloff = 1 - Math.pow(distance, 2.5);
-                    
+                    const cx = this.size / 2, cy = this.size / 2;
+                    const dx = (x - cx) / cx, dy = (y - cy) / cy;
+                    const falloff = 1 - Math.pow(Math.sqrt(dx * dx + dy * dy), 2.5);
                     height = height * 0.7 + falloff * 0.3;
                     height = Math.max(0, Math.min(1, height));
-                    
                     this.tiles[y][x] = new Tile(x, y, height);
+                }
+            }
+            this.staticDirty = true;
+        }
+
+        // Экосистема: рост деревьев
+        growTrees() {
+            // 0.5% шанс на клетку земли
+            const candidates = [];
+            for (let y = 0; y < this.size; y++) {
+                for (let x = 0; x < this.size; x++) {
+                    const tile = this.tiles[y][x];
+                    if (tile.biome === 'GRASS' && !tile.unit && !tile.building) {
+                        candidates.push(tile);
+                    }
+                }
+            }
+            // Чтобы не обходить все 6400 клеток каждый тик, выбираем 32 случайные (0.5% от 6400)
+            const attempts = Math.floor(candidates.length * 0.005);
+            for (let i = 0; i < attempts; i++) {
+                if (candidates.length === 0) break;
+                const idx = Math.floor(Math.random() * candidates.length);
+                const tile = candidates[idx];
+                if (tile.biome === 'GRASS') {
+                    tile.biome = 'FOREST';
+                    this.staticDirty = true;
+                }
+                candidates.splice(idx, 1);
+            }
+        }
+
+        // Постройка дома
+        buildHouse(x, y, kingdomId) {
+            const tile = this.tiles[y][x];
+            // Создаём новое королевство, если у юнита его нет
+            if (kingdomId === null || !this.kingdoms.has(kingdomId)) {
+                const colorSet = KINGDOM_COLORS[this.kingdoms.size % KINGDOM_COLORS.length];
+                const kingdom = new Kingdom(nextKingdomId++, colorSet);
+                this.kingdoms.set(kingdom.id, kingdom);
+                kingdomId = kingdom.id;
+            }
+            const kingdom = this.kingdoms.get(kingdomId);
+            const building = new Building(x, y, 'house', kingdomId);
+            tile.building = building;
+            tile.kingdomId = kingdomId;
+            kingdom.addTile(x, y);
+            this.buildings.push(building);
+            this.staticDirty = true;
+            return kingdomId;
+        }
+
+        // Спавн юнита на тайл
+        spawnUnit(x, y) {
+            if (!this.inBounds(x, y)) return null;
+            const tile = this.tiles[y][x];
+            if (!tile.isWalkable() || tile.unit) return null;
+            const unit = new Unit(x, y);
+            tile.unit = unit;
+            this.units.push(unit);
+            return unit;
+        }
+
+        update() {
+            // Удаляем мёртвых
+            this.units = this.units.filter(u => u.alive);
+
+            // Экосистема
+            this.growTrees();
+
+            // Обновление юнитов
+            for (let unit of this.units) {
+                unit.update(this);
+                // Привязка к королевству через первый дом
+                if (unit.kingdomId === null) {
+                    // Ищем ближайший дом
+                    for (let b of this.buildings) {
+                        const dist = Math.abs(b.x - unit.x) + Math.abs(b.y - unit.y);
+                        if (dist <= 5) {
+                            unit.kingdomId = b.kingdomId;
+                            unit.color = this.kingdoms.get(b.kingdomId).color;
+                            break;
+                        }
+                    }
                 }
             }
         }
 
-        update() {
-            // Обновление юнитов
-            for (let unit of this.units) {
-                unit.update(this);
-            }
-        }
-
-        render(ctx, tileSize) {
-            // Отрисовка тайлов
+        // Отрисовка статики (тайлы + подсветка королевств + здания)
+        renderStatic(ctx, tileSize) {
+            // Тайлы
             for (let y = 0; y < this.size; y++) {
                 for (let x = 0; x < this.size; x++) {
                     this.tiles[y][x].render(ctx, tileSize);
                 }
             }
-            
-            // Отрисовка юнитов
+            // Подсветка королевств
+            for (let kingdom of this.kingdoms.values()) {
+                ctx.fillStyle = kingdom.fadeColor;
+                for (let key of kingdom.tiles) {
+                    const [x, y] = key.split(',').map(Number);
+                    ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
+                }
+            }
+            // Здания
+            for (let b of this.buildings) {
+                const kingdom = this.kingdoms.get(b.kingdomId);
+                b.render(ctx, tileSize, kingdom.color);
+            }
+        }
+
+        // Отрисовка динамики (юниты)
+        renderDynamic(ctx, tileSize) {
             for (let unit of this.units) {
                 unit.render(ctx, tileSize);
             }
@@ -276,43 +598,56 @@
         constructor() {
             this.canvas = document.getElementById('game-canvas');
             this.ctx = this.canvas.getContext('2d');
-            
-            // Расчет размера тайла под экран
             this.tileSize = this.calculateTileSize();
             this.canvas.width = WORLD_SIZE * this.tileSize;
             this.canvas.height = WORLD_SIZE * this.tileSize;
-            
+
+            // Offscreen canvas для статики (оптимизация)
+            this.staticCanvas = document.createElement('canvas');
+            this.staticCanvas.width = this.canvas.width;
+            this.staticCanvas.height = this.canvas.height;
+            this.staticCtx = this.staticCanvas.getContext('2d');
+
             this.world = new World(WORLD_SIZE);
             this.day = 0;
             this.paused = false;
-            this.speed = 10; // FPS обновления логики
+            this.speed = 10;
             this.lastUpdateTime = 0;
             this.updateInterval = 1000 / this.speed;
-            
+            this.spawnMode = false;
+
             this.setupUI();
+            this.setupCanvasInput();
+            this.renderStaticCache();
             this.gameLoop(0);
         }
 
         calculateTileSize() {
             const maxWidth = window.innerWidth - 40;
             const maxHeight = window.innerHeight - 100;
-            const sizeByWidth = Math.floor(maxWidth / WORLD_SIZE);
-            const sizeByHeight = Math.floor(maxHeight / WORLD_SIZE);
-            return Math.max(4, Math.min(sizeByWidth, sizeByHeight));
+            return Math.max(4, Math.min(
+                Math.floor(maxWidth / WORLD_SIZE),
+                Math.floor(maxHeight / WORLD_SIZE)
+            ));
         }
 
         setupUI() {
             document.getElementById('btn-generate').addEventListener('click', () => {
                 this.world.generate();
                 this.day = 0;
-                this.updateDayCounter();
+                this.updateStats();
+                this.renderStaticCache();
             });
-
             document.getElementById('btn-pause').addEventListener('click', (e) => {
                 this.paused = !this.paused;
                 e.target.textContent = this.paused ? 'Старт' : 'Пауза';
             });
-
+            const spawnBtn = document.getElementById('btn-spawn');
+            spawnBtn.addEventListener('click', (e) => {
+                this.spawnMode = !this.spawnMode;
+                e.target.classList.toggle('active', this.spawnMode);
+                this.canvas.classList.toggle('spawn-mode', this.spawnMode);
+            });
             const speedSlider = document.getElementById('speed-slider');
             const speedValue = document.getElementById('speed-value');
             speedSlider.addEventListener('input', (e) => {
@@ -322,24 +657,50 @@
             });
         }
 
-        updateDayCounter() {
+        setupCanvasInput() {
+            this.canvas.addEventListener('click', (e) => {
+                if (!this.spawnMode) return;
+                const rect = this.canvas.getBoundingClientRect();
+                const x = Math.floor((e.clientX - rect.left) / this.tileSize);
+                const y = Math.floor((e.clientY - rect.top) / this.tileSize);
+                const unit = this.world.spawnUnit(x, y);
+                if (unit) this.updateStats();
+            });
+        }
+
+        updateStats() {
             document.getElementById('day-counter').textContent = `День: ${this.day}`;
+            document.getElementById('pop-counter').textContent = `Людей: ${this.world.units.filter(u => u.alive).length}`;
+            document.getElementById('kingdom-counter').textContent = `Королевств: ${this.world.kingdoms.size}`;
+        }
+
+        // Перерисовка offscreen-кэша статики
+        renderStaticCache() {
+            this.staticCtx.clearRect(0, 0, this.staticCanvas.width, this.staticCanvas.height);
+            this.world.renderStatic(this.staticCtx, this.tileSize);
+            this.world.staticDirty = false;
         }
 
         update(timestamp) {
             if (this.paused) return;
-            
             if (timestamp - this.lastUpdateTime >= this.updateInterval) {
                 this.world.update();
                 this.day++;
-                this.updateDayCounter();
+                this.updateStats();
                 this.lastUpdateTime = timestamp;
             }
         }
 
         render() {
+            // Если статика изменилась (рубка/рост/стройка) — обновляем кэш
+            if (this.world.staticDirty) {
+                this.renderStaticCache();
+            }
+            // Blit статики
             this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-            this.world.render(this.ctx, this.tileSize);
+            this.ctx.drawImage(this.staticCanvas, 0, 0);
+            // Динамика поверх
+            this.world.renderDynamic(this.ctx, this.tileSize);
         }
 
         gameLoop(timestamp) {
