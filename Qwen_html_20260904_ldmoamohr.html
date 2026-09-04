@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>God Simulator - Prototype</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e;
+            font-family: 'Courier New', monospace;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #ui-panel {
+            background: #16213e;
+            padding: 10px 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            border-bottom: 2px solid #0f3460;
+            width: 100%;
+            justify-content: center;
+        }
+        button {
+            background: #0f3460;
+            color: #eee;
+            border: 1px solid #533483;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background 0.2s;
+        }
+        button:hover { background: #533483; }
+        #speed-control { display: flex; align-items: center; gap: 8px; }
+        input[type="range"] { width: 100px; }
+        #day-counter {
+            background: #0f3460;
+            padding: 8px 16px;
+            border: 1px solid #533483;
+            min-width: 120px;
+            text-align: center;
+        }
+        #game-canvas {
+            border: 2px solid #0f3460;
+            margin-top: 10px;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui-panel">
+        <button id="btn-generate">Сгенерировать заново</button>
+        <button id="btn-pause">Пауза</button>
+        <div id="speed-control">
+            <label>Скорость:</label>
+            <input type="range" id="speed-slider" min="1" max="60" value="10">
+            <span id="speed-value">10</span>
+        </div>
+        <div id="day-counter">День: 0</div>
+    </div>
+    <canvas id="game-canvas"></canvas>
+
+    <script>
+    // ==================== КОНСТАНТЫ ====================
+    const WORLD_SIZE = 80;
+    const BIOMES = {
+        DEEP_WATER:  { color: '#1a3a52', name: 'Глубокая вода' },
+        SHALLOW:     { color: '#4a90a4', name: 'Мелководье' },
+        SAND:        { color: '#e8d68c', name: 'Песок' },
+        GRASS:       { color: '#5a8c3c', name: 'Трава' },
+        FOREST:      { color: '#2d5a1e', name: 'Лес' },
+        MOUNTAIN:    { color: '#6b6b6b', name: 'Горы' }
+    };
+
+    // Пороги высот для биомов
+    const BIOME_THRESHOLDS = [
+        { max: 0.25, biome: 'DEEP_WATER' },
+        { max: 0.38, biome: 'SHALLOW' },
+        { max: 0.42, biome: 'SAND' },
+        { max: 0.65, biome: 'GRASS' },
+        { max: 0.82, biome: 'FOREST' },
+        { max: 1.0,  biome: 'MOUNTAIN' }
+    ];
+
+    // ==================== КЛАСС TILE ====================
+    class Tile {
+        constructor(x, y, height) {
+            this.x = x;
+            this.y = y;
+            this.height = height;
+            this.biome = this.calculateBiome();
+        }
+
+        calculateBiome() {
+            for (let threshold of BIOME_THRESHOLDS) {
+                if (this.height <= threshold.max) {
+                    return threshold.biome;
+                }
+            }
+            return 'MOUNTAIN';
+        }
+
+        render(ctx, tileSize) {
+            ctx.fillStyle = BIOMES[this.biome].color;
+            ctx.fillRect(this.x * tileSize, this.y * tileSize, tileSize, tileSize);
+        }
+    }
+
+    // ==================== КЛАСС UNIT ====================
+    class Unit {
+        constructor(x, y, type) {
+            this.x = x;
+            this.y = y;
+            this.type = type;
+            this.alive = true;
+        }
+
+        update(world) {
+            // Заготовка для будущей логики юнитов
+        }
+
+        render(ctx, tileSize) {
+            // Заготовка для отрисовки юнитов
+        }
+    }
+
+    // ==================== ГЕНЕРАТОР ШУМА (Value Noise) ====================
+    class NoiseGenerator {
+        constructor(seed) {
+            this.seed = seed || Math.random() * 10000;
+            this.permutation = this.generatePermutation();
+        }
+
+        generatePermutation() {
+            const perm = [];
+            for (let i = 0; i < 256; i++) perm[i] = i;
+            // Перемешивание с seed
+            let s = this.seed;
+            for (let i = 255; i > 0; i--) {
+                s = (s * 9301 + 49297) % 233280;
+                const j = Math.floor((s / 233280) * (i + 1));
+                [perm[i], perm[j]] = [perm[j], perm[i]];
+            }
+            return perm.concat(perm); // Дублирование для удобства
+        }
+
+        fade(t) {
+            return t * t * t * (t * (t * 6 - 15) + 10); // Улучшенная интерполяция
+        }
+
+        lerp(t, a, b) {
+            return a + t * (b - a);
+        }
+
+        grad(hash, x, y) {
+            const h = hash & 3;
+            const u = h < 2 ? x : y;
+            const v = h < 2 ? y : x;
+            return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
+        }
+
+        noise2D(x, y) {
+            const X = Math.floor(x) & 255;
+            const Y = Math.floor(y) & 255;
+            
+            x -= Math.floor(x);
+            y -= Math.floor(y);
+            
+            const u = this.fade(x);
+            const v = this.fade(y);
+            
+            const A = this.permutation[X] + Y;
+            const AA = this.permutation[A];
+            const AB = this.permutation[A + 1];
+            const B = this.permutation[X + 1] + Y;
+            const BA = this.permutation[B];
+            const BB = this.permutation[B + 1];
+            
+            return this.lerp(v,
+                this.lerp(u, this.grad(this.permutation[AA], x, y),
+                             this.grad(this.permutation[BA], x - 1, y)),
+                this.lerp(u, this.grad(this.permutation[AB], x, y - 1),
+                             this.grad(this.permutation[BB], x - 1, y - 1))
+            );
+        }
+
+        // Фрактальный шум (несколько октав)
+        fractal(x, y, octaves, persistence, lacunarity) {
+            let total = 0;
+            let frequency = 1;
+            let amplitude = 1;
+            let maxValue = 0;
+            
+            for (let i = 0; i < octaves; i++) {
+                total += this.noise2D(x * frequency, y * frequency) * amplitude;
+                maxValue += amplitude;
+                amplitude *= persistence;
+                frequency *= lacunarity;
+            }
+            
+            return total / maxValue;
+        }
+    }
+
+    // ==================== КЛАСС WORLD ====================
+    class World {
+        constructor(size) {
+            this.size = size;
+            this.tiles = [];
+            this.units = [];
+            this.generate();
+        }
+
+        generate() {
+            const noise = new NoiseGenerator();
+            this.tiles = [];
+            
+            const scale = 0.05; // Масштаб шума
+            const octaves = 4;
+            const persistence = 0.5;
+            const lacunarity = 2.0;
+            
+            for (let y = 0; y < this.size; y++) {
+                this.tiles[y] = [];
+                for (let x = 0; x < this.size; x++) {
+                    // Генерация высоты с фрактальным шумом
+                    let height = noise.fractal(x * scale, y * scale, octaves, persistence, lacunarity);
+                    
+                    // Нормализация в диапазон [0, 1]
+                    height = (height + 1) / 2;
+                    
+                    // Радиальное затухание к краям (создает эффект материка/островов)
+                    const centerX = this.size / 2;
+                    const centerY = this.size / 2;
+                    const dx = (x - centerX) / centerX;
+                    const dy = (y - centerY) / centerY;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    const falloff = 1 - Math.pow(distance, 2.5);
+                    
+                    height = height * 0.7 + falloff * 0.3;
+                    height = Math.max(0, Math.min(1, height));
+                    
+                    this.tiles[y][x] = new Tile(x, y, height);
+                }
+            }
+        }
+
+        update() {
+            // Обновление юнитов
+            for (let unit of this.units) {
+                unit.update(this);
+            }
+        }
+
+        render(ctx, tileSize) {
+            // Отрисовка тайлов
+            for (let y = 0; y < this.size; y++) {
+                for (let x = 0; x < this.size; x++) {
+                    this.tiles[y][x].render(ctx, tileSize);
+                }
+            }
+            
+            // Отрисовка юнитов
+            for (let unit of this.units) {
+                unit.render(ctx, tileSize);
+            }
+        }
+    }
+
+    // ==================== КЛАСС GAME ====================
+    class Game {
+        constructor() {
+            this.canvas = document.getElementById('game-canvas');
+            this.ctx = this.canvas.getContext('2d');
+            
+            // Расчет размера тайла под экран
+            this.tileSize = this.calculateTileSize();
+            this.canvas.width = WORLD_SIZE * this.tileSize;
+            this.canvas.height = WORLD_SIZE * this.tileSize;
+            
+            this.world = new World(WORLD_SIZE);
+            this.day = 0;
+            this.paused = false;
+            this.speed = 10; // FPS обновления логики
+            this.lastUpdateTime = 0;
+            this.updateInterval = 1000 / this.speed;
+            
+            this.setupUI();
+            this.gameLoop(0);
+        }
+
+        calculateTileSize() {
+            const maxWidth = window.innerWidth - 40;
+            const maxHeight = window.innerHeight - 100;
+            const sizeByWidth = Math.floor(maxWidth / WORLD_SIZE);
+            const sizeByHeight = Math.floor(maxHeight / WORLD_SIZE);
+            return Math.max(4, Math.min(sizeByWidth, sizeByHeight));
+        }
+
+        setupUI() {
+            document.getElementById('btn-generate').addEventListener('click', () => {
+                this.world.generate();
+                this.day = 0;
+                this.updateDayCounter();
+            });
+
+            document.getElementById('btn-pause').addEventListener('click', (e) => {
+                this.paused = !this.paused;
+                e.target.textContent = this.paused ? 'Старт' : 'Пауза';
+            });
+
+            const speedSlider = document.getElementById('speed-slider');
+            const speedValue = document.getElementById('speed-value');
+            speedSlider.addEventListener('input', (e) => {
+                this.speed = parseInt(e.target.value);
+                this.updateInterval = 1000 / this.speed;
+                speedValue.textContent = this.speed;
+            });
+        }
+
+        updateDayCounter() {
+            document.getElementById('day-counter').textContent = `День: ${this.day}`;
+        }
+
+        update(timestamp) {
+            if (this.paused) return;
+            
+            if (timestamp - this.lastUpdateTime >= this.updateInterval) {
+                this.world.update();
+                this.day++;
+                this.updateDayCounter();
+                this.lastUpdateTime = timestamp;
+            }
+        }
+
+        render() {
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+            this.world.render(this.ctx, this.tileSize);
+        }
+
+        gameLoop(timestamp) {
+            this.update(timestamp);
+            this.render();
+            requestAnimationFrame((t) => this.gameLoop(t));
+        }
+    }
+
+    // ==================== ЗАПУСК ====================
+    window.addEventListener('load', () => {
+        new Game();
+    });
+    </script>
+</body>
+</html>
